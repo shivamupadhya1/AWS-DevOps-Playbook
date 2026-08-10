@@ -6,7 +6,7 @@
 >
 > Chapter 07
 >
-> Part 5 – Production Troubleshooting
+> Part 4 – Security, IAM & Secrets
 
 ---
 
@@ -14,555 +14,475 @@
 
 After completing this chapter, you should be able to:
 
-- Debug ECS production issues
-- Identify root causes quickly
-- Follow a structured troubleshooting flow
-- Explain your approach confidently in interviews
-- Handle real-world production incidents
+- Understand ECS security architecture
+- Explain Task Role vs Task Execution Role
+- Secure applications using IAM
+- Integrate Secrets Manager
+- Integrate Parameter Store
+- Understand ECR authentication
+- Apply least privilege
+- Secure production ECS workloads
+- Answer IAM interview questions confidently
 
 ---
 
-# Universal ECS Troubleshooting Flow
-
-Whenever an ECS issue occurs, follow this order:
+# 1. ECS Security Architecture
 
 ```
-Problem
-
-↓
-
-ECS Service Events
-
-↓
-
-Task Status
-
-↓
-
-Task Stopped Reason
-
-↓
-
-CloudWatch Logs
-
-↓
-
-Target Group Health
-
-↓
-
-ALB Health Checks
-
-↓
-
-ECR Image
-
-↓
-
-IAM Permissions
-
-↓
-
-Networking
-
-↓
-
-Root Cause
-
-↓
-
-Fix
+                IAM
+                 │
+        ┌────────┴────────┐
+        │                 │
+Task Execution Role    Task Role
+        │                 │
+        ▼                 ▼
+Pull Image          Access AWS Services
+from ECR
 ```
 
-Never start guessing.
+Remember this diagram.
+
+Nearly every interview asks this.
 
 ---
 
-# Scenario 1
+# 2. Two IAM Roles in ECS
 
-## Problem
+ECS commonly uses two IAM roles.
 
-Task is stuck in **PENDING**.
+```
+Task Execution Role
+
+Task Role
+```
+
+Most interview confusion happens here.
 
 ---
 
-### Possible Reasons
+# 3. Task Execution Role
 
-- No CPU available
-- No memory available
-- No EC2 capacity
-- Capacity Provider issue
-- Image pull delay
-- ENI allocation issue (Fargate)
-- Placement constraints
+⭐⭐⭐⭐⭐
+
+Purpose
+
+Used by **ECS itself** before your application starts.
+
+Responsibilities
+
+- Pull image from ECR
+- Send logs to CloudWatch
+- Retrieve Secrets Manager values
+- Retrieve Parameter Store values
+
+Think of it as:
+
+> Permissions used to **start the container**.
 
 ---
 
-### Investigation
+# 4. Task Role
 
-```bash
-aws ecs describe-services
-```
+⭐⭐⭐⭐⭐
 
-```bash
-aws ecs describe-tasks
-```
+Purpose
 
-Console
+Used by the **application running inside the container**.
 
-```
-Cluster
+Examples
+
+Application wants to
+
+- Read S3
+- Write DynamoDB
+- Publish SNS
+- Read SQS
+- Access Secrets Manager
+- Call AWS APIs
+
+Those permissions belong in the Task Role.
+
+---
+
+# 5. Easy Way to Remember
+
+Task Execution Role
 
 ↓
 
-Service
+Container startup
+
+Task Role
 
 ↓
 
-Events
-```
-
-Look for messages like:
-
-```
-insufficient CPU
-
-insufficient memory
-
-unable to place task
-```
+Application runtime
 
 ---
 
-### Root Cause
+# 6. Example
 
-Scheduler cannot place the Task.
-
----
-
-### Fix
-
-- Scale the cluster
-- Add EC2 instances
-- Increase Fargate capacity if applicable
-- Reduce Task CPU or memory
-- Review placement constraints
-
----
-
-### Interview Answer
-
-"I would first inspect ECS Service Events because they usually explain why the scheduler could not place the Task. Based on the event message, I would verify cluster capacity, CPU, memory, networking, and placement constraints before making changes."
-
----
-
-# Scenario 2
-
-## Problem
-
-Task immediately stops after starting.
-
----
-
-### Possible Reasons
-
-- Application crash
-- Wrong CMD/ENTRYPOINT
-- Missing environment variables
-- Secret retrieval failure
-- Application startup exception
-
----
-
-### Investigation
-
-Check
+Application
 
 ```
-Stopped Reason
-
-Exit Code
-
-CloudWatch Logs
+Spring Boot
 ```
 
----
-
-### Fix
-
-Correct the application or Task Definition, create a new revision, and redeploy.
-
----
-
-### Interview Answer
-
-"My first step is checking the container exit code and CloudWatch Logs because they reveal why the application terminated."
-
----
-
-# Scenario 3
-
-## Problem
-
-CannotPullContainerError
-
----
-
-### Possible Reasons
-
-- Image missing
-- Wrong tag
-- Repository deleted
-- IAM permission missing
-- Authentication failure
-- Network issue
-
----
-
-### Investigation
-
-Verify
-
-- Repository exists
-- Image tag exists
-- Task Execution Role
-- VPC connectivity
-- NAT Gateway (private subnets)
-- VPC Endpoint for ECR (if used)
-
----
-
-### Fix
-
-Correct the image reference or IAM configuration and redeploy.
-
----
-
-### Interview Answer
-
-"I would verify the Task Definition image URI, confirm the image exists in ECR, validate the Task Execution Role permissions, and ensure the Task has network connectivity to ECR."
-
----
-
-# Scenario 4
-
-## Problem
-
-New image pushed.
-
-ECS still runs the old version.
-
----
-
-### Possible Reasons
-
-- Service not updated
-- Task Definition not revised
-- Mutable `latest` tag
-- Deployment not triggered
-
----
-
-### Investigation
-
-Compare
+Needs
 
 ```
-Running Task Definition Revision
+S3
+
+DynamoDB
+
+SNS
+```
+
+Assign permissions
+
+```
+Task Role
+```
+
+NOT
+
+Execution Role.
+
+---
+
+# 7. ECR Authentication Flow
+
+```
+Task Starts
 
 ↓
 
-Latest Task Definition Revision
+Execution Role
+
+↓
+
+ECR Authentication Token
+
+↓
+
+Pull Image
+
+↓
+
+Container Starts
+
+↓
+
+Task Role Active
+
+↓
+
+Application Calls AWS
+```
+
+This flow is frequently asked.
+
+---
+
+# 8. Why Separate Roles?
+
+Suppose
+
+Application only needs
+
+```
+S3 Read
+```
+
+It should not also receive
+
+```
+ECR Push
+
+CloudWatch Admin
+
+Secrets Admin
+```
+
+Separation follows the **Principle of Least Privilege**.
+
+---
+
+# 9. Principle of Least Privilege
+
+⭐⭐⭐⭐⭐
+
+Grant only required permissions.
+
+Example
+
+Instead of
+
+```
+AmazonS3FullAccess
+```
+
+Use
+
+```
+s3:GetObject
+
+s3:ListBucket
+```
+
+Only.
+
+---
+
+# 10. Secrets Management
+
+Never store
+
+```
+Password
+
+API Key
+
+Token
+```
+
+inside
+
+- Dockerfile
+- Git
+- Environment files
+- Source code
+
+Use
+
+```
+AWS Secrets Manager
 ```
 
 ---
 
-### Fix
+# 11. Secrets Manager Integration
 
-Register a new Task Definition revision and update the Service.
+Flow
 
----
+```
+Secrets Manager
 
-### Interview Answer
+↓
 
-"Pushing a new image alone does not update running Tasks. ECS deploys only when the Service is updated to a new Task Definition revision."
+Execution Role retrieves secret
 
----
+↓
 
-# Scenario 5
+Injected into Container
 
-## Problem
+↓
 
-ALB returns **502 Bad Gateway**.
+Application uses secret
+```
 
----
-
-### Possible Reasons
-
-- Wrong container port
-- Wrong Target Group port
-- Application crashed
-- Security Group blocks traffic
-- Health check misconfiguration
+Secrets remain outside the image.
 
 ---
 
-### Investigation
+# 12. Parameter Store
 
-Check
+Suitable for
+
+- Configuration
+- URLs
+- Feature flags
+- Non-sensitive values
+
+SecureString parameters can also be encrypted using KMS.
+
+---
+
+# 13. Secrets Manager vs Parameter Store
+
+| Feature | Secrets Manager | Parameter Store |
+|----------|-----------------|-----------------|
+| Passwords | ✅ | ✅ (SecureString) |
+| Automatic Rotation | ✅ | ❌ |
+| KMS Encryption | ✅ | ✅ |
+| API Keys | ✅ | ✅ |
+| Configuration Values | Possible | Excellent |
+
+---
+
+# 14. Environment Variables
+
+Instead of
+
+```
+DB_PASSWORD=password123
+```
+
+Use
+
+```
+Secret ARN
+```
+
+in the Task Definition.
+
+ECS resolves the secret securely.
+
+---
+
+# 15. IAM Policy Example
+
+Application needs
+
+```
+Read
+
+↓
+
+S3 Bucket
+```
+
+Policy
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "s3:GetObject"
+  ],
+  "Resource": [
+    "arn:aws:s3:::my-bucket/*"
+  ]
+}
+```
+
+Avoid wildcard permissions whenever possible.
+
+---
+
+# 16. Security Groups
+
+Typical Production
+
+```
+Internet
+
+↓
+
+ALB
+
+↓
+
+Security Group
+
+↓
+
+ECS Tasks
+
+↓
+
+Security Group
+
+↓
+
+Database
+```
+
+Do not expose Tasks directly to the Internet.
+
+---
+
+# 17. Private Subnets
+
+Best Practice
 
 ```
 ALB
 
 ↓
 
-Target Group
+Public Subnet
 
 ↓
 
-Healthy Targets
+ECS Tasks
 
 ↓
 
-Container Port
+Private Subnet
 
 ↓
 
-Application Logs
+Database
+
+↓
+
+Private Subnet
 ```
 
----
-
-### Fix
-
-Correct the port mapping, health check path, or networking.
+This limits direct access.
 
 ---
 
-### Interview Answer
+# 18. ECR Security
 
-"I would inspect Target Group health first, then verify the container port, security groups, and application logs."
+Recommendations
 
----
-
-# Scenario 6
-
-## Problem
-
-ALB returns **503 Service Unavailable**.
+- Private repositories
+- IAM authentication
+- Scan-on-push
+- Lifecycle policies
+- KMS encryption
 
 ---
 
-### Possible Reasons
+# 19. Logging Security
 
-- No healthy Tasks
-- Desired Count = 0
-- Deployment failed
-- Health checks failing
-
----
-
-### Investigation
+Send logs to
 
 ```
-Target Group
-
-↓
-
-Healthy Hosts
-
-↓
-
-Service Events
-```
-
----
-
-### Fix
-
-Restore healthy Tasks and resolve deployment issues.
-
----
-
-# Scenario 7
-
-## Problem
-
-Deployment never finishes.
-
----
-
-### Possible Reasons
-
-- Health checks never pass
-- Application startup takes too long
-- CPU shortage
-- Memory shortage
-- Broken application
-
----
-
-### Investigation
-
-```
-Service Events
-
-↓
-
 CloudWatch Logs
-
-↓
-
-Target Group Health
 ```
 
----
+Benefits
 
-### Fix
-
-Correct the startup issue and redeploy.
-
----
-
-# Scenario 8
-
-## Problem
-
-Service keeps replacing Tasks.
+- Audit trail
+- Incident investigation
+- Centralized logging
 
 ---
 
-### Possible Reasons
+# 20. Production Security Checklist
 
-- Health check failure
-- Application crash
-- Memory exhaustion
-- OOMKilled
-- Exit code failure
+✔ Use private subnets
 
----
+✔ Use ALB
 
-### Investigation
+✔ Use Security Groups
 
-Check
+✔ Use Task Roles
 
-```
-Task History
+✔ Use Secrets Manager
 
-↓
+✔ Use CloudWatch Logs
 
-CloudWatch Logs
+✔ Enable ECR scanning
 
-↓
+✔ Use immutable image tags
 
-Exit Code
-```
+✔ Keep images updated
+
+✔ Follow least privilege
 
 ---
 
-### Fix
+# 21. Production Scenario 1
 
-Resolve the application or infrastructure issue causing repeated failures.
+Problem
 
----
+Application cannot access S3.
 
-# Scenario 9
-
-## Problem
-
-CPU utilization remains above 90%.
-
----
-
-### Investigation
-
-CloudWatch Metrics
-
-↓
-
-Container Insights
-
-↓
-
-Application profiling
-
-↓
-
-CPU-intensive processes
-
----
-
-### Fix
-
-- Scale out Tasks
-- Optimize application
-- Increase CPU allocation
-
----
-
-# Scenario 10
-
-## Problem
-
-Memory utilization reaches 100%.
-
----
-
-### Investigation
-
-CloudWatch
-
-↓
-
-Application logs
-
-↓
-
-Memory leak analysis
-
----
-
-### Fix
-
-Increase memory allocation or fix the memory leak.
-
----
-
-# Scenario 11
-
-## Problem
-
-CloudWatch shows healthy infrastructure, but users report slowness.
-
----
-
-### Investigation
-
-- Database latency
-- External API latency
-- Thread pool exhaustion
-- Application logs
-- X-Ray tracing (if enabled)
-
----
-
-### Lesson
-
-Infrastructure metrics alone do not always explain application performance.
-
----
-
-# Scenario 12
-
-## Problem
-
-Task cannot access S3.
-
----
-
-### Investigation
-
-Verify
+Investigation
 
 ```
 Task Role
@@ -576,356 +496,368 @@ IAM Policy
 Bucket Policy
 ```
 
----
+Root Cause
 
-### Root Cause
-
-Task Role lacks permission.
+Task Role missing permission.
 
 ---
 
-### Fix
+# 22. Production Scenario 2
 
-Grant least-privilege access to the Task Role.
+Problem
+
+Task cannot pull image.
+
+Investigation
+
+```
+Execution Role
+
+↓
+
+ECR Permission
+
+↓
+
+Repository Access
+```
+
+Root Cause
+
+Execution Role missing ECR permissions.
 
 ---
 
-# Scenario 13
+# 23. Production Scenario 3
 
-## Problem
+Problem
 
-Task cannot pull Secrets Manager secret.
+Secret retrieval fails.
 
----
-
-### Investigation
-
-Verify
+Investigation
 
 - Secret ARN
-- Task Role permissions
-- KMS permissions
 - Region
+- IAM permissions
+- KMS permissions
 
 ---
 
-### Fix
+# 24. Production Scenario 4
 
-Correct IAM permissions and redeploy.
+Problem
 
----
+Developer stored AWS credentials in Dockerfile.
 
-# Scenario 14
+Risk
 
-## Problem
+Anyone with the image can extract them.
 
-Tasks remain healthy but traffic is uneven.
+Correct Solution
 
----
-
-### Investigation
-
-- ALB algorithm
-- Sticky sessions
-- Slow instances
-- Request distribution
+Use IAM Task Roles.
 
 ---
 
-### Fix
+# 25. Best Practices
 
-Review load-balancing configuration.
-
----
-
-# Scenario 15
-
-## Problem
-
-Cluster has no remaining capacity.
+- Never store AWS credentials inside containers.
+- Use Task Roles.
+- Use Execution Roles only for startup operations.
+- Store secrets externally.
+- Enable logging.
+- Keep Tasks in private subnets.
+- Grant minimum permissions.
 
 ---
 
-### Investigation
+# 26. Common Mistakes
 
-```
-Available CPU
-
-↓
-
-Available Memory
-
-↓
-
-EC2 Instances
-
-↓
-
-Auto Scaling Group
-```
+❌ Giving S3 permissions to the Execution Role instead of the Task Role.
 
 ---
 
-### Fix
-
-Scale the Auto Scaling Group or reduce Task resource requirements.
+❌ Embedding passwords in Docker images.
 
 ---
 
-# Scenario 16
-
-## Problem
-
-ECS Agent disconnected.
+❌ Using `AdministratorAccess`.
 
 ---
 
-### Investigation
-
-On EC2
-
-```bash
-systemctl status ecs
-```
-
-Check
-
-- ECS Agent
-- Docker
-- IAM Instance Profile
-- Network connectivity
+❌ Using wildcard (`*`) permissions everywhere.
 
 ---
 
-### Fix
-
-Restart the ECS Agent or repair the EC2 instance.
+❌ Exposing ECS Tasks directly to the Internet.
 
 ---
 
-# Scenario 17
-
-## Problem
-
-Deployment succeeds.
-
-Application still fails.
-
----
-
-### Investigation
-
-- Business logs
-- Database connectivity
-- Third-party APIs
-- Configuration
-- Secrets
-
----
-
-### Lesson
-
-A successful deployment does not guarantee a healthy application.
-
----
-
-# Scenario 18
-
-## Problem
-
-Task starts but exits with code 137.
-
----
-
-### Root Cause
-
-Usually indicates the container was killed due to insufficient memory (OOM).
-
----
-
-### Fix
-
-Increase memory allocation or optimize application memory usage.
-
----
-
-# Scenario 19
-
-## Problem
-
-Task is healthy internally but ALB marks it unhealthy.
-
----
-
-### Possible Reasons
-
-- Wrong health check path
-- Wrong health check port
-- Security Group issue
-- Timeout
-- Health check threshold
-
----
-
-### Fix
-
-Align ALB health check configuration with the application.
-
----
-
-# Scenario 20
-
-## Problem
-
-Deployment rolled back automatically.
-
----
-
-### Investigation
-
-- Deployment alarms
-- Health check failures
-- CloudWatch metrics
-- Application logs
-
----
-
-### Fix
-
-Correct the issue before attempting another deployment.
-
----
-
-# Production Debugging Checklist
-
-Always verify:
-
-- ECS Service Events
-- Running Task Definition
-- Task Status
-- Exit Code
-- CloudWatch Logs
-- Target Group Health
-- ALB Listener
-- Container Port
-- Security Groups
-- IAM Roles
-- ECR Image Tag
-- Cluster Capacity
-- CPU
-- Memory
-- Secrets
-- Environment Variables
-
----
-
-# Common AWS Error Mapping
-
-| Error | Start Troubleshooting From |
-|--------|----------------------------|
-| CannotPullContainerError | ECR, IAM, Network |
-| Task Pending | Cluster Capacity, Scheduler |
-| Task Stopped | Exit Code, Logs |
-| 502 Bad Gateway | Target Group, Ports, App |
-| 503 Service Unavailable | Healthy Targets, Service |
-| High CPU | CloudWatch, Container Insights |
-| High Memory | Memory Metrics, Logs |
-| Access Denied | IAM Role |
-| Secret Retrieval Failed | Secrets Manager, IAM |
-| Deployment Failed | Service Events |
-
----
-
-# Amazon Interview Questions
+# 27. Interview Questions
 
 ## Question 1
 
-A Task is in PENDING. What is your approach?
+What is the difference between Task Role and Task Execution Role?
 
 ### Perfect Answer
 
-"I first inspect ECS Service Events because they usually explain why scheduling failed. Then I verify cluster CPU, memory, placement constraints, networking, and Capacity Providers before deciding whether additional infrastructure is required."
+The Task Execution Role is used by ECS during container startup to pull images from ECR, retrieve secrets, and send logs to CloudWatch. The Task Role is assumed by the running application and grants permissions to access AWS services such as S3, DynamoDB, or SQS.
 
 ---
 
 ## Question 2
 
-A deployment succeeds but users still receive errors. What would you do?
+Which role is used to pull images from ECR?
 
 ### Perfect Answer
 
-"I verify Target Group health, review CloudWatch metrics and logs, check application health endpoints, validate database connectivity, and confirm the new Task Definition contains the expected configuration."
+The Task Execution Role.
+
+ECS uses this role to authenticate with ECR and pull container images before the application starts.
 
 ---
 
 ## Question 3
 
-Why is ECS still running the old image?
+Which role allows a Spring Boot application to read from S3?
 
 ### Perfect Answer
 
-"ECS does not automatically deploy new images when they are pushed to ECR. A new Task Definition revision must be created and the ECS Service must be updated to use that revision."
+The Task Role because the application accesses AWS services after the container has started.
 
 ---
 
 ## Question 4
 
-What is the first place you check during an ECS incident?
+Why should AWS credentials never be stored in Docker images?
 
 ### Perfect Answer
 
-"I begin with ECS Service Events because they provide immediate insight into scheduling failures, deployment issues, and Task placement problems."
+Anyone with access to the image could extract those credentials. IAM Task Roles provide temporary credentials securely without embedding secrets.
 
 ---
 
-## Think Like a Production Engineer
+## Question 5
 
-Never troubleshoot randomly.
+Why use Secrets Manager?
 
-Always follow a structured flow:
+### Perfect Answer
+
+Secrets Manager securely stores sensitive information, supports encryption with KMS, enables automatic rotation, and integrates directly with ECS Task Definitions.
+
+---
+
+## Question 6
+
+What is the Principle of Least Privilege?
+
+### Perfect Answer
+
+It means granting only the permissions required for a specific task and nothing more, reducing the impact of compromised applications or accidental misuse.
+
+---
+
+## Question 7
+
+Can Task Roles and Execution Roles be the same IAM Role?
+
+### Perfect Answer
+
+Technically they can be, but it is not recommended. Separating them follows the principle of least privilege and reduces security risk.
+
+---
+
+## Question 8
+
+How does ECS obtain secrets securely?
+
+### Perfect Answer
+
+The Task Definition references the secret ARN. During startup, ECS retrieves the secret using the appropriate IAM permissions and injects it into the container without storing it in the image.
+
+---
+
+## Question 9
+
+Why place ECS Tasks in private subnets?
+
+### Perfect Answer
+
+Private subnets prevent direct Internet access to application containers. External traffic should flow through an Application Load Balancer, improving security.
+
+---
+
+## Question 10
+
+How would you secure an ECS production environment?
+
+### Perfect Answer
+
+I would use private ECR repositories, immutable image tags, scan-on-push, private subnets, ALB, Security Groups, Task Roles, Secrets Manager, CloudWatch logging, and least-privilege IAM policies.
+
+---
+
+# 28. Amazon Cross Questions
+
+### Question
+
+The application cannot read S3. Which IAM role do you check first?
+
+### Perfect Answer
+
+The Task Role because it controls permissions used by the running application.
+
+---
+
+### Question
+
+The image cannot be pulled from ECR. Which IAM role do you check?
+
+### Perfect Answer
+
+The Task Execution Role because ECS uses it to authenticate with ECR before the container starts.
+
+---
+
+### Question
+
+Would you give AdministratorAccess to a Task Role?
+
+### Perfect Answer
+
+No.
+
+I would grant only the permissions required by the application according to the principle of least privilege.
+
+---
+
+### Question
+
+Where should database passwords be stored?
+
+### Perfect Answer
+
+In AWS Secrets Manager, referenced from the ECS Task Definition, rather than inside the Docker image or source code.
+
+---
+
+# 29. Hands-on Labs (To Perform Later)
+
+## Lab 1
+
+Create a Task Execution Role with ECR and CloudWatch permissions.
+
+---
+
+## Lab 2
+
+Create a Task Role with read-only S3 access.
+
+---
+
+## Lab 3
+
+Store a database password in Secrets Manager.
+
+---
+
+## Lab 4
+
+Reference the secret in an ECS Task Definition.
+
+---
+
+## Lab 5
+
+Deploy an application that reads the secret successfully.
+
+---
+
+## Lab 6
+
+Remove the Task Role permission and observe the AccessDenied error.
+
+---
+
+# 30. One-Page Revision
 
 ```
-Problem
+          ECS Security
 
-↓
+                │
+     ┌──────────┴──────────┐
+     │                     │
+Task Execution Role    Task Role
+     │                     │
+ECR, Logs, Secrets     Application
+     │                     │
+Pull Image           S3, SQS, DynamoDB
 
-Service Events
+        Secrets Manager
+               │
+         Secure Injection
 
-↓
-
-Task
-
-↓
-
-Logs
-
-↓
-
-ALB
-
-↓
-
-IAM
-
-↓
-
-Network
-
-↓
-
-Root Cause
-
-↓
-
-Fix
-
-↓
-
-Validation
+        Private Subnets
+               │
+              ALB
 ```
 
-A good DevOps engineer doesn't guess.
+Remember
 
-A good DevOps engineer follows evidence.
+- Task Role
+- Task Execution Role
+- Secrets Manager
+- Parameter Store
+- Least Privilege
+- Private Subnets
+- Security Groups
+- ECR Authentication
+- CloudWatch Logs
 
-# End of Part 5
+---
+
+# 31. Think Like a Production Engineer
+
+Don't think:
+
+> "The application needs AWS access."
+
+Think:
+
+> "Which identity should perform this action?"
+
+Decision Flow
+
+```
+Need to pull image?
+
+↓
+
+Task Execution Role
+
+Need to access AWS service?
+
+↓
+
+Task Role
+
+Need a password?
+
+↓
+
+Secrets Manager
+
+Need configuration?
+
+↓
+
+Parameter Store
+```
+
+The easiest interview shortcut to remember:
+
+> **Execution Role = Start the container**
+>
+> **Task Role = Run the application**
+
+# End of Part 4
